@@ -1,1 +1,29 @@
+name: HILMA Apuväline-agentti
 
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  hae-kilpailutukset:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lataa koodi
+        uses: actions/checkout@v4
+
+      - name: Asenna Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Asenna riippuvuudet
+        run: pip install requests anthropic
+
+      - name: Aja HILMA-agentti
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: python hilma_apuvaline_agentti.py
