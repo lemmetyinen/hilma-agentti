@@ -18,7 +18,7 @@ jobs:
           python-version: '3.11'
 
       - name: Asenna riippuvuudet
-        run: pip install requests anthropic
+        run: pip install requests anthropic beautifulsoup4
 
       - name: Aja HILMA-agentti
         env:
