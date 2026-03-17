@@ -1,11 +1,11 @@
 """
-HILMA Apuväline-agentti
-=======================
-Hakee HILMAsta apuvälinekilpailutuksia, analysoi ne Claude AI:lla
+HILMA + Cloudia Apuväline-agentti
+==================================
+Hakee HILMAsta ja Cloudiasta apuvälinekilpailutuksia, analysoi ne Claude AI:lla
 ja lähettää yhteenvedon sähköpostiin.
 
 Asennus:
-    pip install requests anthropic
+    pip install requests anthropic beautifulsoup4
 
 Ympäristömuuttujat (aseta ennen ajoa):
     ANTHROPIC_API_KEY   - Anthropic API-avain (console.anthropic.com)
@@ -28,6 +28,7 @@ import anthropic
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from bs4 import BeautifulSoup
 
 
 # ─── KONFIGURAATIO ────────────────────────────────────────────────────────────
@@ -352,6 +353,99 @@ def laheta_sahkoposti(otsikko: str, html_sisalto: str) -> bool:
         return False
 
 
+# ─── CLOUDIA-HAKU ─────────────────────────────────────────────────────────────
+
+def hae_cloudiasta() -> list[dict]:
+    """
+    Hakee Cloudian kilpailutussivulta apuväline-ilmoituksia.
+    Cloudia on Suomen suurin hankintarengas (kunnat, kuntayhtymät).
+    """
+    print("Haetaan Cloudiasta...")
+
+    cloudia_ilmoitukset = []
+    alku_pvm = datetime.now() - timedelta(days=HAKU_PAIVAT)
+
+    # Cloudia tarjoaa avoimen hakusivun kilpailutuksille
+    for hakusana in HAKUSANAT[:6]:  # Rajoitetaan hakuja ettei tule liikaa
+        try:
+            url = "https://www.cloudia.fi/kilpailutukset"
+            params = {
+                "search": hakusana,
+                "status": "open",
+            }
+            headers = {
+                "User-Agent": "Mozilla/5.0 (compatible; HILMA-agentti/1.0)"
+            }
+            resp = requests.get(url, params=params, headers=headers, timeout=15)
+            resp.raise_for_status()
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # Etsi kilpailutuskortteja sivulta
+            # Cloudia käyttää erilaisia CSS-luokkia eri versioissa
+            kortit = (
+                soup.find_all("div", class_="tender-item") or
+                soup.find_all("article", class_="tender") or
+                soup.find_all("li", class_="competition-item") or
+                soup.find_all("div", class_="competition") or
+                soup.find_all(attrs={"data-tender": True})
+            )
+
+            for kortti in kortit:
+                try:
+                    otsikko_el = (
+                        kortti.find("h2") or kortti.find("h3") or
+                        kortti.find("a", class_="title") or kortti.find("a")
+                    )
+                    otsikko = otsikko_el.get_text(strip=True) if otsikko_el else ""
+
+                    if not otsikko:
+                        continue
+
+                    linkki_el = kortti.find("a", href=True)
+                    linkki = linkki_el["href"] if linkki_el else ""
+                    if linkki and not linkki.startswith("http"):
+                        linkki = "https://www.cloudia.fi" + linkki
+
+                    # Etsi päivämäärä
+                    pvm_el = kortti.find(class_=lambda c: c and "date" in c.lower()) if kortti else None
+                    deadline = pvm_el.get_text(strip=True) if pvm_el else "Ei tietoa"
+
+                    # Etsi hankintayksikkö
+                    org_el = kortti.find(class_=lambda c: c and ("org" in c.lower() or "buyer" in c.lower())) if kortti else None
+                    organisaatio = org_el.get_text(strip=True) if org_el else "Cloudia-jäsen"
+
+                    cloudia_ilmoitukset.append({
+                        "id": f"cloudia-{linkki}",
+                        "title": otsikko,
+                        "organisation": organisaatio,
+                        "description": f"Kilpailutus löytyi hakusanalla: {hakusana}",
+                        "submissionDeadline": deadline,
+                        "noticeUrl": linkki,
+                        "lahde": "Cloudia",
+                    })
+                except Exception:
+                    continue
+
+            if kortit:
+                print(f"  Cloudia '{hakusana}': {len(kortit)} osumaa")
+
+        except Exception as e:
+            print(f"  Varoitus: Cloudia-haku sanalla '{hakusana}' epäonnistui: {e}")
+
+    # Poista duplikaatit
+    nahdyt = set()
+    uniikit = []
+    for ilm in cloudia_ilmoitukset:
+        avain = ilm.get("id", ilm.get("title", ""))
+        if avain and avain not in nahdyt:
+            nahdyt.add(avain)
+            uniikit.append(ilm)
+
+    print(f"Cloudia: {len(uniikit)} uniikkia ilmoitusta.\n")
+    return uniikit
+
+
 # ─── PÄÄOHJELMA ───────────────────────────────────────────────────────────────
 
 def main():
@@ -361,20 +455,28 @@ def main():
     print("=" * 50 + "\n")
 
     # 1. Hae HILMA-ilmoitukset
-    ilmoitukset = hae_hilmasta()
+    hilma_ilmoitukset = hae_hilmasta()
 
-    if not ilmoitukset:
+    # 2. Hae Cloudia-ilmoitukset
+    cloudia_ilmoitukset = hae_cloudiasta()
+
+    # 3. Yhdistä kaikki ilmoitukset
+    kaikki_ilmoitukset = hilma_ilmoitukset + cloudia_ilmoitukset
+
+    if not kaikki_ilmoitukset:
         print("Ei uusia ilmoituksia tänään. Ei lähetetä sähköpostia.")
         return
 
-    # 2. Analysoi Claude AI:lla
-    tulokset = analysoi_claudella(ilmoitukset)
+    print(f"Yhteensä {len(kaikki_ilmoitukset)} ilmoitusta (HILMA: {len(hilma_ilmoitukset)}, Cloudia: {len(cloudia_ilmoitukset)})\n")
+
+    # 4. Analysoi Claude AI:lla
+    tulokset = analysoi_claudella(kaikki_ilmoitukset)
 
     if not tulokset:
         print("Ei relevantteja ilmoituksia löytynyt. Ei lähetetä sähköpostia.")
         return
 
-    # 3. Muodosta ja lähetä sähköposti
+    # 5. Muodosta ja lähetä sähköposti
     otsikko, html = muodosta_sahkoposti(tulokset)
     laheta_sahkoposti(otsikko, html)
 
