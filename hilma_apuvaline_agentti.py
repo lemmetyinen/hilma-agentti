@@ -86,7 +86,7 @@ def hae_hilmasta() -> list[dict]:
     """
     print("Haetaan HILMAsta...")
 
-    base_url = "https://hankintailmoitukset.fi/api/v2/notices"
+    base_url = "https://hankintailmoitukset.fi/api/v1/notice"
     alku_pvm = (datetime.now() - timedelta(days=HAKU_PAIVAT)).strftime("%Y-%m-%d")
 
     kaikki_ilmoitukset = []
@@ -96,7 +96,7 @@ def hae_hilmasta() -> list[dict]:
         try:
             params = {
                 "keyword": hakusana,
-                "publishedFrom": alku_pvm,
+                "datePublished": alku_pvm,
                 "limit": 20,
                 "offset": 0,
             }
@@ -114,7 +114,7 @@ def hae_hilmasta() -> list[dict]:
         try:
             params = {
                 "cpvCode": cpv,
-                "publishedFrom": alku_pvm,
+                "datePublished": alku_pvm,
                 "limit": 20,
                 "offset": 0,
             }
