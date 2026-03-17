@@ -81,63 +81,73 @@ GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 
 def hae_hilmasta() -> list[dict]:
     """
-    Hakee HILMA:n avoimesta REST-rajapinnasta kilpailutuksia.
-    Dokumentaatio: https://hankintailmoitukset.fi/fi/docs/api
+    Hakee HILMA:n hakusivulta kilpailutuksia web-scraping-tekniikalla.
+    Vanha /api/v2/notices on poistettu käytöstä, joten haetaan julkiselta sivulta.
     """
     print("Haetaan HILMAsta...")
 
-    base_url = "https://hankintailmoitukset.fi/api/v1/notice"
-    alku_pvm = (datetime.now() - timedelta(days=HAKU_PAIVAT)).strftime("%Y-%m-%d")
-
     kaikki_ilmoitukset = []
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; hilma-agentti/2.0)"}
 
-    # Hae avainsanoilla
     for hakusana in HAKUSANAT:
         try:
-            params = {
-                "keyword": hakusana,
-                "datePublished": alku_pvm,
-                "limit": 20,
-                "offset": 0,
-            }
-            resp = requests.get(base_url, params=params, timeout=15)
+            url = "https://hankintailmoitukset.fi/fi/notices/list"
+            params = {"search": hakusana, "status": "NOTICE_STATUS_OPEN"}
+            resp = requests.get(url, params=params, headers=headers, timeout=15)
             resp.raise_for_status()
-            data = resp.json()
-            ilmoitukset = data.get("notices", data.get("items", []))
-            print(f"  '{hakusana}': {len(ilmoitukset)} osumaa")
-            kaikki_ilmoitukset.extend(ilmoitukset)
-        except Exception as e:
-            print(f"  Varoitus: haku sanalla '{hakusana}' epäonnistui: {e}")
 
-    # Hae CPV-koodeilla
-    for cpv in CPV_KOODIT:
-        try:
-            params = {
-                "cpvCode": cpv,
-                "datePublished": alku_pvm,
-                "limit": 20,
-                "offset": 0,
-            }
-            resp = requests.get(base_url, params=params, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-            ilmoitukset = data.get("notices", data.get("items", []))
-            if ilmoitukset:
-                print(f"  CPV {cpv}: {len(ilmoitukset)} osumaa")
-            kaikki_ilmoitukset.extend(ilmoitukset)
-        except Exception as e:
-            print(f"  Varoitus: CPV-haku {cpv} epäonnistui: {e}")
+            soup = BeautifulSoup(resp.text, "html.parser")
 
-    # Poista duplikaatit (sama ilmoitus-ID)
+            # HILMA listaa ilmoitukset taulukossa tai korteissa
+            rivit = (
+                soup.find_all("tr", class_=lambda c: c and "notice" in c.lower()) or
+                soup.find_all("div", class_=lambda c: c and "notice" in c.lower()) or
+                soup.find_all("li", class_=lambda c: c and "notice" in c.lower()) or
+                soup.find_all("article")
+            )
+
+            for rivi in rivit:
+                try:
+                    linkki_el = rivi.find("a", href=True)
+                    if not linkki_el:
+                        continue
+                    otsikko = linkki_el.get_text(strip=True)
+                    if not otsikko:
+                        continue
+                    linkki = linkki_el["href"]
+                    if not linkki.startswith("http"):
+                        linkki = "https://hankintailmoitukset.fi" + linkki
+                    kaikki_teksti = rivi.get_text(" ", strip=True)
+                    kaikki_ilmoitukset.append({
+                        "id": f"hilma-{linkki}",
+                        "title": otsikko,
+                        "organisation": "Julkinen hankintayksikkö",
+                        "description": f"HILMA-ilmoitus, hakusana: {hakusana}. {kaikki_teksti[:200]}",
+                        "submissionDeadline": "Katso ilmoituksesta",
+                        "noticeUrl": linkki,
+                        "lahde": "HILMA",
+                    })
+                except Exception:
+                    continue
+
+            if rivit:
+                print(f"  HILMA '{hakusana}': {len(rivit)} osumaa")
+            else:
+                print(f"  HILMA '{hakusana}': 0 osumaa")
+
+        except Exception as e:
+            print(f"  Varoitus: HILMA-haku sanalla '{hakusana}' epäonnistui: {e}")
+
+    # Poista duplikaatit
     nahdyt_idt = set()
     uniikit = []
     for ilm in kaikki_ilmoitukset:
-        ilm_id = ilm.get("id") or ilm.get("noticeId") or ilm.get("noticeNumber")
+        ilm_id = ilm.get("id") or ilm.get("title", "")
         if ilm_id and ilm_id not in nahdyt_idt:
             nahdyt_idt.add(ilm_id)
             uniikit.append(ilm)
 
-    print(f"Yhteensä {len(uniikit)} uniikkia ilmoitusta löytyi.\n")
+    print(f"HILMA: {len(uniikit)} uniikkia ilmoitusta löytyi.\n")
     return uniikit
 
 
