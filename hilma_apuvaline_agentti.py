@@ -81,62 +81,131 @@ GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 
 def hae_hilmasta() -> list[dict]:
     """
-    Hakee HILMA:n hakusivulta kilpailutuksia web-scraping-tekniikalla.
-    Vanha /api/v2/notices on poistettu käytöstä, joten haetaan julkiselta sivulta.
+    Hakee kilpailutuksia kahdella tavalla:
+    1. TED (Tenders Electronic Daily) API - sisältää kaikki EU-kynnysarvon ylittävät
+       suomalaiset hankinnat (sama data kuin HILMA EU-ilmoituksissa)
+    2. HILMA hakuvahti -tyylinen haku julkisen haun kautta
     """
-    print("Haetaan HILMAsta...")
+    print("Haetaan HILMAsta / TED-rajapinnasta...")
 
     kaikki_ilmoitukset = []
     headers = {"User-Agent": "Mozilla/5.0 (compatible; hilma-agentti/2.0)"}
+    alku_pvm = (datetime.now() - timedelta(days=max(HAKU_PAIVAT, 7))).strftime("%Y%m%d")
+    tanaan = datetime.now().strftime("%Y%m%d")
 
-    for hakusana in HAKUSANAT:
+    # ── TED API (EU:n avoin rajapinta, ei vaadi avainta) ──────────────────────
+    # Hakee suomalaiset hankinnat avainsanoilla
+    for hakusana in HAKUSANAT[:8]:  # Rajoitetaan hakumäärää
         try:
-            url = "https://hankintailmoitukset.fi/fi/notices/list"
-            params = {"search": hakusana, "status": "NOTICE_STATUS_OPEN"}
-            resp = requests.get(url, params=params, headers=headers, timeout=15)
-            resp.raise_for_status()
+            # TED REST API v3
+            url = "https://api.ted.europa.eu/v3/notices/search"
+            payload = {
+                "query": f'({hakusana}) AND (ND=[FI] OR CY=[FI])',
+                "fields": ["ND", "TI", "AA_NAME", "DT", "CY", "TD", "PC", "TW", "DS"],
+                "limit": 10,
+                "page": 1,
+                "scope": "ALL",
+                "dateFrom": alku_pvm,
+                "dateTo": tanaan,
+            }
+            resp = requests.post(url, json=payload, headers=headers, timeout=15)
 
-            soup = BeautifulSoup(resp.text, "html.parser")
+            if resp.status_code == 200:
+                data = resp.json()
+                ilmoitukset = data.get("notices", data.get("results", []))
+                for ilm in ilmoitukset:
+                    nd = ilm.get("ND", ilm.get("noticeNumber", ""))
+                    otsikko = ""
+                    if isinstance(ilm.get("TI"), list):
+                        otsikko = ilm["TI"][0].get("value", "") if ilm["TI"] else ""
+                    elif isinstance(ilm.get("TI"), str):
+                        otsikko = ilm["TI"]
+                    otsikko = otsikko or ilm.get("title", f"Ilmoitus {nd}")
 
-            # HILMA listaa ilmoitukset taulukossa tai korteissa
-            rivit = (
-                soup.find_all("tr", class_=lambda c: c and "notice" in c.lower()) or
-                soup.find_all("div", class_=lambda c: c and "notice" in c.lower()) or
-                soup.find_all("li", class_=lambda c: c and "notice" in c.lower()) or
-                soup.find_all("article")
-            )
+                    org = ""
+                    if isinstance(ilm.get("AA_NAME"), list):
+                        org = ilm["AA_NAME"][0].get("value", "") if ilm["AA_NAME"] else ""
+                    elif isinstance(ilm.get("AA_NAME"), str):
+                        org = ilm["AA_NAME"]
 
-            for rivi in rivit:
-                try:
-                    linkki_el = rivi.find("a", href=True)
-                    if not linkki_el:
-                        continue
-                    otsikko = linkki_el.get_text(strip=True)
-                    if not otsikko:
-                        continue
-                    linkki = linkki_el["href"]
-                    if not linkki.startswith("http"):
-                        linkki = "https://hankintailmoitukset.fi" + linkki
-                    kaikki_teksti = rivi.get_text(" ", strip=True)
                     kaikki_ilmoitukset.append({
-                        "id": f"hilma-{linkki}",
+                        "id": f"ted-{nd}",
                         "title": otsikko,
-                        "organisation": "Julkinen hankintayksikkö",
-                        "description": f"HILMA-ilmoitus, hakusana: {hakusana}. {kaikki_teksti[:200]}",
-                        "submissionDeadline": "Katso ilmoituksesta",
-                        "noticeUrl": linkki,
-                        "lahde": "HILMA",
+                        "organisation": org or "Suomalainen hankintayksikkö",
+                        "description": f"TED-ilmoitus {nd}, hakusana: {hakusana}",
+                        "submissionDeadline": ilm.get("DT", "Katso ilmoituksesta"),
+                        "noticeUrl": f"https://ted.europa.eu/en/notice/{nd}" if nd else "https://ted.europa.eu",
+                        "lahde": "HILMA/TED",
                     })
-                except Exception:
-                    continue
-
-            if rivit:
-                print(f"  HILMA '{hakusana}': {len(rivit)} osumaa")
+                if ilmoitukset:
+                    print(f"  TED '{hakusana}': {len(ilmoitukset)} osumaa")
             else:
-                print(f"  HILMA '{hakusana}': 0 osumaa")
+                # Kokeile vanhempaa TED API v2
+                url2 = "https://ted.europa.eu/api/v2.0/notices/search"
+                params = {
+                    "q": f"TD=[3] AND CY=[FI] AND ({hakusana})",
+                    "fields": "ND,TI,AA_NAME,DT",
+                    "limit": 10,
+                    "page": 1,
+                    "publicationDateFrom": alku_pvm,
+                }
+                resp2 = requests.get(url2, params=params, headers=headers, timeout=15)
+                if resp2.status_code == 200:
+                    data2 = resp2.json()
+                    ilmoitukset2 = data2.get("results", data2.get("notices", []))
+                    for ilm in ilmoitukset2:
+                        nd = ilm.get("ND", "")
+                        kaikki_ilmoitukset.append({
+                            "id": f"ted2-{nd}",
+                            "title": ilm.get("TI", f"Ilmoitus {nd}"),
+                            "organisation": ilm.get("AA_NAME", "Hankintayksikkö"),
+                            "description": f"TED-ilmoitus, hakusana: {hakusana}",
+                            "submissionDeadline": ilm.get("DT", "Katso ilmoituksesta"),
+                            "noticeUrl": f"https://ted.europa.eu/en/notice/{nd}",
+                            "lahde": "HILMA/TED",
+                        })
+                    if ilmoitukset2:
+                        print(f"  TED v2 '{hakusana}': {len(ilmoitukset2)} osumaa")
 
         except Exception as e:
-            print(f"  Varoitus: HILMA-haku sanalla '{hakusana}' epäonnistui: {e}")
+            print(f"  Varoitus: TED-haku '{hakusana}' epäonnistui: {e}")
+
+    # ── CPV-koodeilla TED:stä ────────────────────────────────────────────────
+    cpv_haku = " OR ".join([f"PC=[{c}]" for c in CPV_KOODIT[:4]])
+    try:
+        url = "https://api.ted.europa.eu/v3/notices/search"
+        payload = {
+            "query": f'CY=[FI] AND ({cpv_haku})',
+            "fields": ["ND", "TI", "AA_NAME", "DT", "PC"],
+            "limit": 20,
+            "page": 1,
+            "scope": "ALL",
+            "dateFrom": alku_pvm,
+            "dateTo": tanaan,
+        }
+        resp = requests.post(url, json=payload, headers=headers, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            ilmoitukset = data.get("notices", data.get("results", []))
+            for ilm in ilmoitukset:
+                nd = ilm.get("ND", "")
+                otsikko = ""
+                if isinstance(ilm.get("TI"), list):
+                    otsikko = ilm["TI"][0].get("value", "") if ilm["TI"] else ""
+                otsikko = otsikko or f"Apuvälinehankinta {nd}"
+                kaikki_ilmoitukset.append({
+                    "id": f"ted-cpv-{nd}",
+                    "title": otsikko,
+                    "organisation": "Suomalainen hankintayksikkö",
+                    "description": f"TED CPV-haku, ilmoitus {nd}",
+                    "submissionDeadline": ilm.get("DT", "Katso ilmoituksesta"),
+                    "noticeUrl": f"https://ted.europa.eu/en/notice/{nd}",
+                    "lahde": "HILMA/TED",
+                })
+            if ilmoitukset:
+                print(f"  TED CPV-haku: {len(ilmoitukset)} osumaa")
+    except Exception as e:
+        print(f"  Varoitus: TED CPV-haku epäonnistui: {e}")
 
     # Poista duplikaatit
     nahdyt_idt = set()
@@ -147,7 +216,7 @@ def hae_hilmasta() -> list[dict]:
             nahdyt_idt.add(ilm_id)
             uniikit.append(ilm)
 
-    print(f"HILMA: {len(uniikit)} uniikkia ilmoitusta löytyi.\n")
+    print(f"HILMA/TED: {len(uniikit)} uniikkia ilmoitusta löytyi.\n")
     return uniikit
 
 
